@@ -1,184 +1,178 @@
 # Robot ETL Pipeline
 
-ETL (Extract-Transform-Load) pipeline for moving large volumes of data from PostgreSQL to a data warehouse.
+**Status**: ✅ Production ETL pipeline successfully connecting robot_executive_state data from PostgreSQL → S3 → Redshift → Power BI
 
-## Features
-
-- **Batch Processing**: Efficiently handles large datasets using batch processing
-- **Multiple Output Formats**: JSONL and CSV support
-- **Logging**: Comprehensive logging to both file and console
-- **Table Inspection**: View table schemas and row counts before extraction
-- **Error Handling**: Robust error handling and recovery
-- **Extensible Design**: Easy to add warehouse loading modules (Snowflake, Redshift, BigQuery, etc.)
-
-## Project Structure
+## System Architecture
 
 ```
-robot-etl-pipeline/
-├── config.py                 # Configuration file (database credentials, settings)
-├── postgres_connector.py      # PostgreSQL connection and data retrieval
-├── etl_pipeline.py          # Main ETL orchestration
-├── requirements.txt         # Python dependencies
-├── extracted_data/          # Output directory for extracted data
-├── etl_pipeline.log        # Log file (auto-generated)
-└── README.md               # This file
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                             DATA PIPELINE FLOW                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+EXTRACT                          STAGE                          LOAD              VISUALIZE
+(PostgreSQL)                      (Amazon S3)                    (Redshift)        (Power BI)
+
+┌──────────────────┐         ┌──────────────┐         ┌──────────────────┐   ┌─────────┐
+│   PostgreSQL     │         │              │         │   Redshift       │   │ Power   │
+│   Database       │         │  S3 Bucket   │         │   Warehouse      │   │   BI    │
+│                  │         │              │         │                  │   │ Reports │
+│ ┌──────────────┐ │  BATCH  │ (Staging)    │  COPY   │ ┌─────────────┐  │   │         │
+│ │ robot_       │ │    ──→  │              │   ──→   │ │ warehouse_  │  │   │   ──→   │
+│ │ executive_   │ │ (CSV)   │ robot_       │         │ │ raw schema  │  │   │         │
+│ │ state table  │ │ EXTRACT │ executive_   │         │ │             │  │   │ Dashboards
+│ │              │ │ 10K     │ state_date   │ LOAD    │ │ robot_      │  │   │ Analytics
+│ │ 10.0.10.238  │ │ rows    │ .csv         │ ROLE    │ │ executive_  │  │   │ Reporting
+│ │ port 5432    │ │ chunks  │              │ IAM     │ │ state       │  │   │
+│ │              │ │         │ ca-central-1 │         │ │             │  │   │
+│ └──────────────┘ │         │              │         │ │ dev database│  │   │
+│                  │         │              │         │ │ serverless  │  │   │
+└──────────────────┘         └──────────────┘         └──────────────────┘   └─────────┘
+        ↓
+   upside database
+   readonly user
 ```
 
-## Setup
+## Pipeline Stages
 
-### 1. Install Dependencies
+### 1. **EXTRACT** - PostgreSQL Data Source
+- **Source**: PostgreSQL database (`upside` database)
+- **Table**: `robot_executive_state`
+- **Method**: Batch processing (10,000 rows per batch for memory efficiency)
+- **Connection**: psycopg2 with SSL/TLS encryption
+- **Data Flow**:
+  - Retrieves table metadata (column names, types, row count)
+  - Iterates through rows in configurable batch sizes
+  - Serializes datetime and binary data to JSON-compatible formats
+  - No data transformation at this stage (source format preserved)
+
+### 2. **STAGE** - Amazon S3 Intermediate Storage
+- **Bucket**: `upside-robotics-redshift-staging-aarav` (ca-central-1)
+- **Format**: CSV with headers
+- **Filename Pattern**: `robot_executive_state/robot_executive_state_YYYYMMDD_HHMMSS.csv`
+- **Delimiter**: Comma (`,`)
+- **Header**: Skip first row during Redshift LOAD
+- **Purpose**: 
+  - Staging area for Redshift COPY command
+  - Temporary storage between extraction and warehouse load
+  - Fault tolerance (file persists if downstream load fails)
+
+### 3. **LOAD** - Amazon Redshift Data Warehouse
+- **Destination**: `warehouse_raw.robot_executive_state`
+- **Schema**: `warehouse_raw` (analytics/business schema, not public)
+- **Database**: `dev` (Redshift serverless)
+- **Load Method**: COPY command with IAM role authentication
+- **Authentication**: 
+  - IAM role-based (preferred for security)
+  - Credentials passed via Redshift service role
+  - Supports fallback to AWS access key/secret token
+- **Load Behavior**:
+  - Full table load (not incremental)
+  - COPY ignores header row
+  - CSV format detection with automatic delimiter
+  - Compression and update statistics disabled for speed
+  - Timeformat auto-detection
+
+### 4. **VISUALIZE** - Power BI Business Intelligence
+- **Connection**: Redshift `warehouse_raw` schema
+- **Dataset**: `robot_executive_state` table
+- **Use**: Interactive dashboards, reports, analytics
+- **Access**: Power BI Desktop or Web
+
+## Execution Flow
+
+```
+1. Initialize ETLPipeline()
+   ├── PostgreSQLConnector → connects to source
+   ├── S3Uploader → initializes AWS session
+   └── RedshiftConnector → ready for warehouse load
+
+2. run_full_redshift_load(table_name)
+   ├── extract_and_stage_to_s3(table_name)
+   │   ├── Connect to PostgreSQL
+   │   ├── Get table metadata
+   │   ├── For each batch (10K rows):
+   │   │   ├── Fetch rows from PostgreSQL
+   │   │   ├── Serialize special data types
+   │   │   └── Write to CSV file
+   │   ├── Upload CSV to S3
+   │   └── Return S3 URI
+   │
+   └── load_from_s3_to_redshift(s3_uri)
+       ├── Connect to Redshift
+       ├── Build COPY command with:
+       │   ├── S3 path
+       │   ├── IAM role for authentication
+       │   ├── CSV format options
+       │   ├── Delimiter and header settings
+       │   └── Region for endpoint resolution
+       ├── Execute COPY statement
+       ├── Monitor execution
+       └── Log results and statistics
+```
+
+## Configuration
+
+Configuration is managed via **`config.py`** with environment variables for sensitive data:
+
+| Component | Environment Variable | Example Value |
+|-----------|---------------------|---------------|
+| **PostgreSQL** | `POSTGRES_HOST` | `10.0.10.238` |
+| | `POSTGRES_PORT` | `5432` |
+| | `POSTGRES_DATABASE` | `upside` |
+| | `POSTGRES_USER` | `upside_readonly` |
+| | `POSTGRES_PASSWORD` | `upside_readonly` |
+| **S3** | `AWS_ACCESS_KEY_ID` | `AKIAIOSFODNN7EXAMPLE` |
+| | `AWS_SECRET_ACCESS_KEY` | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` |
+| | `AWS_SESSION_TOKEN` | (optional) |
+| | `AWS_PROFILE` | `aarav` |
+| **Redshift** | `REDSHIFT_HOST` | `upside-robotics-analytics-wg.905418281504.ca-central-1.redshift-serverless.amazonaws.com` |
+| | `REDSHIFT_PORT` | `5439` |
+| | `REDSHIFT_DATABASE` | `dev` |
+| | `REDSHIFT_USER` | `aarav` |
+| | `REDSHIFT_PASSWORD` | `Password1` |
+| | `REDSHIFT_SCHEMA` | `warehouse_raw` |
+| | `REDSHIFT_TABLE` | `robot_executive_state` |
+| | `REDSHIFT_IAM_ROLE_ARN` | `arn:aws:iam::905418281504:role/service-role/AmazonRedshift-CommandsAccessRole-20260507T114313` |
+
+**All values stored in `.env` file (not committed to git)**:
+- Database passwords and credentials
+- AWS access keys and tokens
+- IAM role ARNs
+- Hostnames and connection details
+
+## Technical Stack
+
+| Layer | Technology |
+|-------|------------|
+| **Orchestration** | Python 3.9+ |
+| **Source DB** | PostgreSQL 12+ |
+| **Data Transport** | AWS S3, Boto3 |
+| **Warehouse** | Amazon Redshift (Serverless) |
+| **BI Tool** | Power BI |
+| **Python Libraries** | psycopg2 (PostgreSQL), boto3 (AWS), python-dotenv (env config) |
+
+## Quick Start
 
 ```bash
+# 1. Install dependencies
 pip install -r requirements.txt
-```
 
-### 2. Configuration
+# 2. Set up environment variables (.env file)
+# AWS credentials, database passwords, IAM role ARN
 
-Edit `config.py` to configure:
-- PostgreSQL connection details (already set with your credentials)
-- Batch size for data processing
-- Source table name (defaults to `robot_executive_state`)
-
-If you prefer not to store AWS credentials in `config.py`, create a `.env` file in the project root with:
-
-```env
-AWS_ACCESS_KEY_ID=<your-access-key-id>
-AWS_SECRET_ACCESS_KEY=<your-secret-access-key>
-AWS_SESSION_TOKEN=
-AWS_PROFILE=
-```
-
-Then restart your terminal before running the pipeline.
-
-### 3. Run Extraction
-
-```bash
+# 3. Run the pipeline
 python etl_pipeline.py
 ```
 
-### 4. Run Full S3 -> Redshift Load
+**Output**:
+- CSV file saved to `extracted_data/robot_executive_state_YYYYMMDD_HHMMSS.csv`
+- Data loaded to Redshift `warehouse_raw.robot_executive_state`
+- Logs written to `etl_pipeline.log`
+- Execution statistics printed to console
 
-The updated pipeline now stages data to S3 and loads it into Redshift. Update `config.py` with your S3 and Redshift settings, then run:
+---
 
-```bash
-python etl_pipeline.py
-```
-
-If you are using explicit AWS credentials, set them in `config.py` or via environment variables:
-
-```bash
-setx AWS_ACCESS_KEY_ID <your-key>
-setx AWS_SECRET_ACCESS_KEY <your-secret>
-```
-
-## Usage Examples
-
-### Basic Extraction (from Python)
-
-```python
-from postgres_connector import PostgreSQLConnector
-from config import ETL_CONFIG
-
-connector = PostgreSQLConnector()
-connector.connect()
-
-# Get table information
-table_info = connector.get_table_info('robot_executive_state')
-print(f"Row count: {table_info['row_count']}")
-
-# Retrieve data in batches
-for batch in connector.retrieve_data_batched('robot_executive_state'):
-    # Process batch
-    print(f"Processing {len(batch)} rows")
-
-connector.disconnect()
-```
-
-### Custom Query
-
-```python
-connector = PostgreSQLConnector()
-connector.connect()
-
-results = connector.execute_query(
-    "SELECT * FROM robot_executive_state WHERE status = %s LIMIT 100",
-    ('completed',)
-)
-
-for row in results:
-    print(row)
-
-connector.disconnect()
-```
-
-## Key Classes
-
-### PostgreSQLConnector
-
-Handles all database operations:
-- `connect()`: Establish database connection
-- `disconnect()`: Close connection
-- `get_table_info(table_name)`: Get table metadata
-- `retrieve_data_batched(table_name, batch_size)`: Retrieve data in memory-efficient batches
-- `retrieve_data_simple(table_name)`: Simple full table load (use for small tables only)
-- `execute_query(query, params)`: Execute custom SQL queries
-
-### ETLPipeline
-
-Orchestrates the extraction process:
-- `extract_from_postgres(table_name, output_format)`: Main extraction method
-- Supports JSONL and CSV output formats
-- Automatically handles serialization of special types (datetime, bytes, etc.)
-- Provides extraction statistics (row count, duration, throughput)
-
-## Output Files
-
-Extracted data is saved to the `extracted_data/` directory with the format:
-```
-robot_executive_state_YYYYMMDD_HHMMSS.jsonl
-```
-
-### JSONL Format Example
-```json
-{"id": 1, "state": "active", "timestamp": "2026-05-07T10:30:00"}
-{"id": 2, "state": "inactive", "timestamp": "2026-05-07T10:31:00"}
-```
-
-## Logging
-
-Logs are written to both:
-- **Console**: Real-time output
-- **File**: `etl_pipeline.log` for persistent records
-
-## Performance Considerations
-
-- **Batch Size**: Configured to 10,000 rows per batch (tune in `config.py` based on memory)
-- **Memory Efficiency**: Batch processing prevents loading entire datasets into memory
-- **Large Tables**: Can handle multi-million row tables efficiently
-
-## Next Steps
-
-1. **Test Connection**: Run the extraction to verify your database connection works
-2. **Warehouse Setup**: Once your data warehouse is ready, create warehouse-specific modules in this codebase
-3. **Load Module**: Implement `warehouse_loader.py` to handle loading extracted data
-4. **Transformation**: Add data transformation logic as needed between extraction and loading
-5. **Orchestration**: Consider using Airflow or similar tools for production scheduling
-
-## Future Enhancements
-
-- [ ] Warehouse loading modules (Snowflake, Redshift, BigQuery, etc.)
-- [ ] Data transformation capabilities
-- [ ] Incremental loading (changed data capture)
-- [ ] Data validation and quality checks
-- [ ] Scheduling and automation (Airflow integration)
-- [ ] Monitoring and alerting
-- [ ] Compression support for output files
-
-## Troubleshooting
-
-### Connection Issues
-- Verify PostgreSQL host and port are accessible
-- Check username/password credentials
+**Key Features**: Batch processing, memory efficient, comprehensive logging, error handling & recovery, modular design for extensibility
 - Ensure firewall allows connections to 10.0.10.238:5432
 
 ### Memory Issues with Large Tables

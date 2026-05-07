@@ -10,11 +10,11 @@ load_dotenv(Path(__file__).parent / ".env")
 
 # PostgreSQL Source Database
 POSTGRES_CONFIG = {
-    "host": "10.0.10.238",
-    "port": 5432,
-    "database": "upside",
-    "user": "upside_readonly",
-    "password": "upside_readonly",
+    "host": os.getenv("POSTGRES_HOST"),
+    "port": int(os.getenv("POSTGRES_PORT", 5432)),
+    "database": os.getenv("POSTGRES_DATABASE"),
+    "user": os.getenv("POSTGRES_USER"),
+    "password": os.getenv("POSTGRES_PASSWORD"),
 }
 
 # S3 staging settings used for Redshift COPY
@@ -35,16 +35,16 @@ AWS_CONFIG = {
 
 # Redshift Warehouse configuration
 REDSHIFT_CONFIG = {
-    "host": "upside-robotics-analytics-wg.905418281504.ca-central-1.redshift-serverless.amazonaws.com",
-    "port": 5439,
-    "database": "dev",
-    "user": "aarav",
-    "password": "Password1",
-    "schema": "warehouse_raw",
-    "table": "robot_executive_state",
+    "host": os.getenv("REDSHIFT_HOST"),
+    "port": int(os.getenv("REDSHIFT_PORT", 5439)),
+    "database": os.getenv("REDSHIFT_DATABASE"),
+    "user": os.getenv("REDSHIFT_USER"),
+    "password": os.getenv("REDSHIFT_PASSWORD"),
+    "schema": os.getenv("REDSHIFT_SCHEMA"),
+    "table": os.getenv("REDSHIFT_TABLE"),
     "sslmode": "require",
     "copy_options": {
-        "iam_role_arn": None,
+        "iam_role_arn": os.getenv("REDSHIFT_IAM_ROLE_ARN"),
         "file_format": "csv",
         "delimiter": ",",
         "ignore_header": 1,
