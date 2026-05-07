@@ -21,8 +21,8 @@ EXTRACT                          STAGE                          LOAD            
 │ │ executive_   │ │ (CSV)   │ robot_       │         │ │ raw schema  │  │   │         │
 │ │ state table  │ │ EXTRACT │ executive_   │         │ │             │  │   │ Dashboards
 │ │              │ │ 10K     │ state_date   │ LOAD    │ │ robot_      │  │   │ Analytics
-│ │ 10.0.10.238  │ │ rows    │ .csv         │ ROLE    │ │ executive_  │  │   │ Reporting
-│ │ port 5432    │ │ chunks  │              │ IAM     │ │ state       │  │   │
+│ │              │ │ rows    │ .csv         │ ROLE    │ │ executive_  │  │   │ Reporting
+│ │              │ │ chunks  │              │ IAM     │ │ state       │  │   │
 │ │              │ │         │ ca-central-1 │         │ │             │  │   │
 │ └──────────────┘ │         │              │         │ │ dev database│  │   │
 │                  │         │              │         │ │ serverless  │  │   │
