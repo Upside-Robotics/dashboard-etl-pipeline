@@ -1,15 +1,17 @@
 """
 Main ETL Pipeline Script
-Orchestrates data extraction from PostgreSQL and prepares for warehouse loading
+Orchestrates data extraction from PostgreSQL and loads data to S3 and Amazon Redshift
 """
 
-import logging
+import csv
 import json
+import logging
 import sys
 from pathlib import Path
 from datetime import datetime
 from postgres_connector import PostgreSQLConnector
-from config import ETL_CONFIG
+from warehouse_loader import S3Uploader, RedshiftConnector
+from config import ETL_CONFIG, S3_CONFIG, AWS_CONFIG, REDSHIFT_CONFIG
 
 # Configure logging
 logging.basicConfig(
@@ -29,135 +31,154 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 class ETLPipeline:
     """Main ETL pipeline orchestrator"""
-    
+
     def __init__(self):
         self.connector = PostgreSQLConnector()
+        self.s3_uploader = S3Uploader(
+            bucket_name=S3_CONFIG['bucket_name'],
+            region_name=S3_CONFIG['region_name'],
+            prefix=S3_CONFIG.get('prefix'),
+            aws_config=AWS_CONFIG,
+        )
+        self.redshift_loader = RedshiftConnector(REDSHIFT_CONFIG)
         self.extraction_stats = {
             'start_time': None,
             'end_time': None,
             'total_rows_extracted': 0,
             'batches_processed': 0,
-            'status': 'pending'
+            'status': 'pending',
+            's3_uri': None,
+            'redshift_status': 'pending',
         }
-    
-    def extract_from_postgres(self, table_name: str, output_format: str = 'jsonl') -> bool:
-        """
-        Extract data from PostgreSQL table
-        
-        Args:
-            table_name: Name of source table
-            output_format: Output format ('jsonl' or 'csv')
-            
-        Returns:
-            bool: Success status
-        """
-        logger.info(f"Starting extraction from table '{table_name}'")
-        self.extraction_stats['start_time'] = datetime.now()
-        
-        if not self.connector.connect():
-            logger.error("Failed to connect to database")
-            self.extraction_stats['status'] = 'failed'
-            return False
-        
-        try:
-            # Get table info
-            table_info = self.connector.get_table_info(table_name)
-            if not table_info:
-                logger.error(f"Table '{table_name}' not found or inaccessible")
-                self.extraction_stats['status'] = 'failed'
-                return False
-            
-            # Create output file
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = OUTPUT_DIR / f"{table_name}_{timestamp}.{output_format}"
-            
-            logger.info(f"Extracting {table_info['row_count']} rows from '{table_name}'")
-            logger.info(f"Output file: {output_file}")
-            
-            if output_format == 'jsonl':
-                self._extract_to_jsonl(table_name, output_file, table_info)
-            elif output_format == 'csv':
-                self._extract_to_csv(table_name, output_file, table_info)
-            else:
-                logger.error(f"Unsupported output format: {output_format}")
-                self.extraction_stats['status'] = 'failed'
-                return False
-            
-            self.extraction_stats['end_time'] = datetime.now()
-            self.extraction_stats['status'] = 'success'
-            
-            duration = (self.extraction_stats['end_time'] - 
-                       self.extraction_stats['start_time']).total_seconds()
-            logger.info(f"Extraction completed in {duration:.2f} seconds")
-            logger.info(f"Total rows extracted: {self.extraction_stats['total_rows_extracted']}")
-            logger.info(f"Batches processed: {self.extraction_stats['batches_processed']}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Extraction failed: {e}")
-            self.extraction_stats['status'] = 'failed'
-            return False
-        
-        finally:
-            self.connector.disconnect()
-    
-    def _extract_to_jsonl(self, table_name: str, output_file: Path, table_info: dict):
-        """Extract data to JSONL format (one JSON object per line)"""
-        try:
-            with open(output_file, 'w') as f:
-                for batch in self.connector.retrieve_data_batched(table_name):
-                    for row in batch:
-                        # Convert datetime objects to ISO format strings
-                        row_serialized = self._serialize_row(row)
-                        f.write(json.dumps(row_serialized) + '\n')
-                        self.extraction_stats['total_rows_extracted'] += 1
-                    
-                    self.extraction_stats['batches_processed'] += 1
-            
-            logger.info(f"Data saved to {output_file}")
-            
-        except Exception as e:
-            logger.error(f"Error writing to JSONL file: {e}")
-            raise
-    
-    def _extract_to_csv(self, table_name: str, output_file: Path, table_info: dict):
-        """Extract data to CSV format"""
-        import csv
-        
-        try:
-            column_names = [col['name'] for col in table_info['columns']]
-            
-            with open(output_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=column_names)
-                writer.writeheader()
-                
-                for batch in self.connector.retrieve_data_batched(table_name):
-                    for row in batch:
-                        row_serialized = self._serialize_row(row)
-                        writer.writerow(row_serialized)
-                        self.extraction_stats['total_rows_extracted'] += 1
-                    
-                    self.extraction_stats['batches_processed'] += 1
-            
-            logger.info(f"Data saved to {output_file}")
-            
-        except Exception as e:
-            logger.error(f"Error writing to CSV file: {e}")
-            raise
-    
+
     def _serialize_row(self, row: dict) -> dict:
         """Convert row data to JSON-serializable format"""
         serialized = {}
         for key, value in row.items():
-            if hasattr(value, 'isoformat'):  # datetime objects
+            if hasattr(value, 'isoformat'):
                 serialized[key] = value.isoformat()
             elif isinstance(value, (bytes, bytearray)):
                 serialized[key] = value.hex()
             else:
                 serialized[key] = value
         return serialized
-    
+
+    def _extract_to_csv_file(self, table_name: str, output_file: Path, table_info: dict):
+        """Extract table data into a CSV file"""
+        column_names = [col['name'] for col in table_info['columns']]
+
+        try:
+            with open(output_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=column_names,
+                    extrasaction='ignore',
+                    quoting=csv.QUOTE_MINIMAL,
+                )
+                writer.writeheader()
+
+                for batch in self.connector.retrieve_data_batched(table_name):
+                    for row in batch:
+                        row_serialized = self._serialize_row(row)
+                        writer.writerow(row_serialized)
+                        self.extraction_stats['total_rows_extracted'] += 1
+
+                    self.extraction_stats['batches_processed'] += 1
+
+            logger.info(f"Data saved to {output_file}")
+            return output_file
+
+        except Exception as e:
+            logger.error(f"Error writing to CSV file: {e}")
+            raise
+
+    def extract_and_stage_to_s3(self, table_name: str) -> str:
+        """Extract data from PostgreSQL and upload the CSV to S3"""
+        logger.info(f"Starting extraction and staging to S3 for '{table_name}'")
+        self.extraction_stats['start_time'] = datetime.now()
+
+        if not self.connector.connect():
+            logger.error("Failed to connect to PostgreSQL")
+            self.extraction_stats['status'] = 'failed'
+            return ""
+
+        try:
+            table_info = self.connector.get_table_info(table_name)
+            if not table_info:
+                logger.error(f"Table '{table_name}' not found or inaccessible")
+                self.extraction_stats['status'] = 'failed'
+                return ""
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_file = OUTPUT_DIR / f"{table_name}_{timestamp}.csv"
+
+            logger.info(f"Extracting {table_info['row_count']} rows from '{table_name}'")
+            local_path = self._extract_to_csv_file(table_name, output_file, table_info)
+
+            s3_uri = self.s3_uploader.upload_file(local_path)
+            self.extraction_stats['s3_uri'] = s3_uri
+            self.extraction_stats['status'] = 'staged'
+
+            logger.info(f"Uploaded extract to S3: {s3_uri}")
+            return s3_uri
+
+        except Exception as e:
+            logger.error(f"Extraction and staging failed: {e}")
+            self.extraction_stats['status'] = 'failed'
+            return ""
+
+        finally:
+            self.connector.disconnect()
+
+    def load_from_s3_to_redshift(self, s3_uri: str) -> bool:
+        """Load a staged S3 file into Redshift using COPY"""
+        if not s3_uri:
+            logger.error("No S3 URI provided for Redshift load")
+            self.extraction_stats['redshift_status'] = 'failed'
+            return False
+
+        target_table = f"{REDSHIFT_CONFIG['schema']}.{REDSHIFT_CONFIG['table']}"
+        copy_options = REDSHIFT_CONFIG.get('copy_options', {})
+
+        if not self.redshift_loader.connect():
+            logger.error("Failed to connect to Redshift")
+            self.extraction_stats['redshift_status'] = 'failed'
+            return False
+
+        try:
+            success = self.redshift_loader.copy_from_s3(
+                target_table=target_table,
+                s3_uri=s3_uri,
+                region=S3_CONFIG['region_name'],
+                iam_role_arn=copy_options.get('iam_role_arn'),
+                aws_credentials={
+                    'aws_access_key_id': AWS_CONFIG.get('aws_access_key_id'),
+                    'aws_secret_access_key': AWS_CONFIG.get('aws_secret_access_key'),
+                    'aws_session_token': AWS_CONFIG.get('aws_session_token'),
+                },
+                file_format=copy_options.get('file_format', 'csv'),
+                delimiter=copy_options.get('delimiter', ','),
+                ignore_header=copy_options.get('ignore_header', 1),
+            )
+            self.extraction_stats['redshift_status'] = 'success' if success else 'failed'
+            return success
+
+        except Exception as e:
+            logger.error(f"Redshift load failed: {e}")
+            self.extraction_stats['redshift_status'] = 'failed'
+            return False
+
+        finally:
+            self.redshift_loader.disconnect()
+
+    def run_full_redshift_load(self, table_name: str) -> bool:
+        """Run the full ETL flow: extract from Postgres, stage to S3, and load to Redshift"""
+        s3_uri = self.extract_and_stage_to_s3(table_name)
+        if not s3_uri:
+            return False
+
+        return self.load_from_s3_to_redshift(s3_uri)
+
     def get_extraction_stats(self) -> dict:
         """Get extraction statistics"""
         return self.extraction_stats
@@ -168,22 +189,18 @@ def main():
     logger.info("=" * 60)
     logger.info("ETL Pipeline Started")
     logger.info("=" * 60)
-    
+
     pipeline = ETLPipeline()
-    
-    # Extract data from robot_executive_state table
-    success = pipeline.extract_from_postgres(
-        table_name=ETL_CONFIG['source_table'],
-        output_format='jsonl'  # Can also use 'csv'
-    )
-    
-    # Print statistics
+    success = pipeline.run_full_redshift_load(ETL_CONFIG['source_table'])
+
     stats = pipeline.get_extraction_stats()
     print("\n" + "=" * 60)
-    print("EXTRACTION STATISTICS")
+    print("ETL STATISTICS")
     print("=" * 60)
     print(f"Status: {stats['status']}")
-    print(f"Total Rows: {stats['total_rows_extracted']}")
+    print(f"S3 URI: {stats.get('s3_uri')}" )
+    print(f"Redshift Load Status: {stats.get('redshift_status')}" )
+    print(f"Total Rows Extracted: {stats['total_rows_extracted']}")
     print(f"Batches Processed: {stats['batches_processed']}")
     if stats['start_time'] and stats['end_time']:
         duration = (stats['end_time'] - stats['start_time']).total_seconds()
@@ -191,7 +208,7 @@ def main():
         if stats['total_rows_extracted'] > 0:
             print(f"Throughput: {stats['total_rows_extracted'] / duration:.2f} rows/sec")
     print("=" * 60 + "\n")
-    
+
     return 0 if success else 1
 
 

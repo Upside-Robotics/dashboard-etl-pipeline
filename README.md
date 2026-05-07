@@ -39,10 +39,36 @@ Edit `config.py` to configure:
 - Batch size for data processing
 - Source table name (defaults to `robot_executive_state`)
 
+If you prefer not to store AWS credentials in `config.py`, create a `.env` file in the project root with:
+
+```env
+AWS_ACCESS_KEY_ID=<your-access-key-id>
+AWS_SECRET_ACCESS_KEY=<your-secret-access-key>
+AWS_SESSION_TOKEN=
+AWS_PROFILE=
+```
+
+Then restart your terminal before running the pipeline.
+
 ### 3. Run Extraction
 
 ```bash
 python etl_pipeline.py
+```
+
+### 4. Run Full S3 -> Redshift Load
+
+The updated pipeline now stages data to S3 and loads it into Redshift. Update `config.py` with your S3 and Redshift settings, then run:
+
+```bash
+python etl_pipeline.py
+```
+
+If you are using explicit AWS credentials, set them in `config.py` or via environment variables:
+
+```bash
+setx AWS_ACCESS_KEY_ID <your-key>
+setx AWS_SECRET_ACCESS_KEY <your-secret>
 ```
 
 ## Usage Examples
