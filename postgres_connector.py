@@ -43,7 +43,7 @@ class PostgreSQLConnector:
                 database=self.config['database'],
                 user=self.config['user'],
                 password=self.config['password'],
-                connect_timeout=ETL_CONFIG['timeout']
+                connect_timeout=ETL_CONFIG['timeout'],
             )
             logger.info(f"Successfully connected to PostgreSQL at {self.config['host']}")
             return True
@@ -162,12 +162,9 @@ class PostgreSQLConnector:
                 
                 logger.info(f"Completed retrieval of {total_rows} rows from '{table_name}'")
                 
-        except errors.ProgrammingError as e:
-            logger.error(f"Query error: {e}")
-            yield []
         except Exception as e:
             logger.error(f"Error during data retrieval: {e}")
-            yield []
+            raise
     
     def retrieve_data_simple(
         self, 

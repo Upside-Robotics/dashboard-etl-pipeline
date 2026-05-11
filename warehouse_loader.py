@@ -149,11 +149,17 @@ class RedshiftConnector:
         )
 
         try:
-            logger.info(f"Running Redshift COPY to table {target_table}")
+            truncate_query = sql.SQL("TRUNCATE TABLE {target}").format(target=target_table_sql)
             with self.connection.cursor() as cur:
+                cur.execute(truncate_query)
+                logger.info(f"Truncated target table {target_table} before COPY")
                 cur.execute(copy_query)
             self.connection.commit()
             logger.info("Redshift COPY completed successfully")
+            with self.connection.cursor() as cur:
+                cur.execute(sql.SQL("SELECT COUNT(*) FROM {target}").format(target=target_table_sql))
+                row_count = cur.fetchone()[0]
+            logger.info(f"Row count after COPY: {row_count} rows in {target_table}")
             return True
         except (DatabaseError, OperationalError) as ex:
             logger.error(f"Redshift COPY failed: {ex}")

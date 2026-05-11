@@ -4,9 +4,9 @@ Orchestrates data extraction from PostgreSQL and loads data to S3 and Amazon Red
 """
 
 import csv
-import json
 import logging
 import sys
+import time
 from pathlib import Path
 from datetime import datetime
 from postgres_connector import PostgreSQLConnector
@@ -49,6 +49,7 @@ class ETLPipeline:
             'status': 'pending',
             's3_uri': None,
             'redshift_status': 'pending',
+            'local_csv_path': None,
         }
 
     def _serialize_row(self, row: dict) -> dict:
@@ -97,43 +98,85 @@ class ETLPipeline:
         logger.info(f"Starting extraction and staging to S3 for '{table_name}'")
         self.extraction_stats['start_time'] = datetime.now()
 
-        if not self.connector.connect():
-            logger.error("Failed to connect to PostgreSQL")
-            self.extraction_stats['status'] = 'failed'
-            return ""
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                logger.warning(f"Retrying extraction (attempt {attempt}/{max_retries}) in 10s...")
+                time.sleep(10)
+                self.extraction_stats['total_rows_extracted'] = 0
+                self.extraction_stats['batches_processed'] = 0
 
-        try:
-            table_info = self.connector.get_table_info(table_name)
-            if not table_info:
-                logger.error(f"Table '{table_name}' not found or inaccessible")
+            if not self.connector.connect():
+                logger.error("Failed to connect to PostgreSQL")
                 self.extraction_stats['status'] = 'failed'
                 return ""
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = OUTPUT_DIR / f"{table_name}_{timestamp}.csv"
+            try:
+                table_info = self.connector.get_table_info(table_name)
+                if not table_info:
+                    logger.error(f"Table '{table_name}' not found or inaccessible")
+                    self.extraction_stats['status'] = 'failed'
+                    return ""
 
-            logger.info(f"Extracting {table_info['row_count']} rows from '{table_name}'")
-            local_path = self._extract_to_csv_file(table_name, output_file, table_info)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_file = OUTPUT_DIR / f"{table_name}_{timestamp}.csv"
+                self.extraction_stats['local_csv_path'] = str(output_file)
 
-            s3_uri = self.s3_uploader.upload_file(local_path)
-            self.extraction_stats['s3_uri'] = s3_uri
-            self.extraction_stats['status'] = 'staged'
+                logger.info(f"Extracting {table_info['row_count']} rows from '{table_name}'")
+                local_path = self._extract_to_csv_file(table_name, output_file, table_info)
 
-            logger.info(f"Uploaded extract to S3: {s3_uri}")
-            return s3_uri
+                if self.extraction_stats['total_rows_extracted'] == 0:
+                    logger.error("Aborting load because extraction failed or produced 0 rows. Redshift table was not modified.")
+                    self.extraction_stats['status'] = 'failed'
+                    return ""
 
-        except Exception as e:
-            logger.error(f"Extraction and staging failed: {e}")
-            self.extraction_stats['status'] = 'failed'
-            return ""
+                s3_uri = self.s3_uploader.upload_file(local_path)
+                self.extraction_stats['s3_uri'] = s3_uri
+                self.extraction_stats['status'] = 'staged'
 
-        finally:
-            self.connector.disconnect()
+                logger.info(f"Uploaded extract to S3: {s3_uri}")
+                return s3_uri
+
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"Extraction attempt {attempt} failed: {e}")
+                else:
+                    logger.error(f"Extraction and staging failed after {max_retries} attempts: {e}")
+                    self.extraction_stats['status'] = 'failed'
+                    return ""
+
+            finally:
+                self.connector.disconnect()
+
+        self.extraction_stats['status'] = 'failed'
+        return ""
+
+    def _csv_has_data_rows(self, csv_path: Path) -> bool:
+        with open(csv_path, encoding='utf-8') as f:
+            f.readline()  # skip header
+            return bool(f.readline())  # True if at least one data row exists
 
     def load_from_s3_to_redshift(self, s3_uri: str) -> bool:
         """Load a staged S3 file into Redshift using COPY"""
         if not s3_uri:
             logger.error("No S3 URI provided for Redshift load")
+            self.extraction_stats['redshift_status'] = 'failed'
+            return False
+
+        rows_extracted = self.extraction_stats['total_rows_extracted']
+        if rows_extracted <= 0:
+            logger.error("Aborting load because extraction failed or produced 0 rows. Redshift table was not modified.")
+            self.extraction_stats['redshift_status'] = 'failed'
+            return False
+
+        local_csv = self.extraction_stats.get('local_csv_path')
+        if not local_csv or not Path(local_csv).exists():
+            logger.error("Aborting load because extraction failed or produced 0 rows. Redshift table was not modified.")
+            self.extraction_stats['redshift_status'] = 'failed'
+            return False
+
+        if not self._csv_has_data_rows(Path(local_csv)):
+            logger.error("Aborting load because extraction failed or produced 0 rows. Redshift table was not modified.")
             self.extraction_stats['redshift_status'] = 'failed'
             return False
 

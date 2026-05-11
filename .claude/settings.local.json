@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem c:\\\\Users\\\\upsid\\\\Documents\\\\Projects\\\\robot-etl-pipeline -Exclude .venv)",
+      "Bash(Select-Object Name, LastWriteTime)"
+    ]
+  }
+}
