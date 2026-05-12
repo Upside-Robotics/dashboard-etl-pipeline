@@ -17,6 +17,6 @@ clean:
 cron-install:
 	chmod +x /home/ec2-user/run-etl.sh
 	(crontab -l 2>/dev/null | grep -v 'run-etl.sh'; \
-	 echo "0 * * * * /home/ec2-user/run-etl.sh >> /home/ec2-user/etl.log 2>&1") | crontab -
+	 echo "0 12-22 * * * /home/ec2-user/run-etl.sh >> /home/ec2-user/etl.log 2>&1") | crontab -
 	@echo "Cron installed:"
 	@crontab -l | grep run-etl.sh

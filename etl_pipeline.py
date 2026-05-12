@@ -214,13 +214,33 @@ class ETLPipeline:
         finally:
             self.redshift_loader.disconnect()
 
+    def _cleanup_old_s3_files(self):
+        """Delete staging files from S3 that were uploaded before today"""
+        today = datetime.now().strftime("%Y%m%d")
+        bucket = S3_CONFIG['bucket_name']
+        prefix = S3_CONFIG.get('prefix', '').rstrip('/') + '/'
+
+        try:
+            paginator = self.s3_uploader.client.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get('Contents', []):
+                    key = obj['Key']
+                    if today not in key:
+                        self.s3_uploader.client.delete_object(Bucket=bucket, Key=key)
+                        logger.info(f"Deleted old S3 file: s3://{bucket}/{key}")
+        except Exception as e:
+            logger.warning(f"S3 cleanup failed (non-fatal): {e}")
+
     def run_full_redshift_load(self, table_name: str) -> bool:
         """Run the full ETL flow: extract from Postgres, stage to S3, and load to Redshift"""
         s3_uri = self.extract_and_stage_to_s3(table_name)
         if not s3_uri:
             return False
 
-        return self.load_from_s3_to_redshift(s3_uri)
+        success = self.load_from_s3_to_redshift(s3_uri)
+        if success:
+            self._cleanup_old_s3_files()
+        return success
 
     def get_extraction_stats(self) -> dict:
         """Get extraction statistics"""
