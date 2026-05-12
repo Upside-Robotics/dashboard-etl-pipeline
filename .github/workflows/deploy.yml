@@ -44,12 +44,24 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Copy run script to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          source: run-etl.sh
+          target: /home/ec2-user/
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1
@@ -74,7 +86,9 @@ jobs:
             docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
             docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
 
-            (crontab -l 2>/dev/null | grep -v '${{ env.CONTAINER_NAME }}'; \
-             echo "0 13 * * * docker run --rm --env-file /home/ec2-user/.env ${{ env.CONTAINER_NAME }}:latest >> /home/ec2-user/etl.log 2>&1") | crontab -
+            chmod +x /home/ec2-user/run-etl.sh
+
+            (crontab -l 2>/dev/null | grep -v 'run-etl.sh'; \
+             echo "0 13 * * * /home/ec2-user/run-etl.sh >> /home/ec2-user/etl.log 2>&1") | crontab -
 
             docker image prune -f

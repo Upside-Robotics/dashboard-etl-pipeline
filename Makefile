@@ -15,7 +15,8 @@ clean:
 	docker rmi $(IMAGE_NAME) 2>/dev/null || true
 
 cron-install:
-	(crontab -l 2>/dev/null | grep -v '$(IMAGE_NAME)'; \
-	 echo "0 13 * * * docker run --rm --env-file /home/ec2-user/.env $(IMAGE_NAME):latest >> /home/ec2-user/etl.log 2>&1") | crontab -
+	chmod +x /home/ec2-user/run-etl.sh
+	(crontab -l 2>/dev/null | grep -v 'run-etl.sh'; \
+	 echo "0 13 * * * /home/ec2-user/run-etl.sh >> /home/ec2-user/etl.log 2>&1") | crontab -
 	@echo "Cron installed:"
-	@crontab -l | grep $(IMAGE_NAME)
+	@crontab -l | grep run-etl.sh
