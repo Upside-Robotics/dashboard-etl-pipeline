@@ -3,6 +3,7 @@ S3 and Redshift loader utilities
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -37,10 +38,9 @@ class S3Uploader:
         secret_key = self.aws_config.get("aws_secret_access_key")
         session_token = self.aws_config.get("aws_session_token")
 
-        if profile_name:
-            return boto3.Session(profile_name=profile_name, region_name=self.region_name)
-
         if access_key and secret_key:
+            os.environ.pop("AWS_PROFILE", None)
+            os.environ.pop("AWS_DEFAULT_PROFILE", None)
             return boto3.Session(
                 aws_access_key_id=access_key,
                 aws_secret_access_key=secret_key,
@@ -48,7 +48,7 @@ class S3Uploader:
                 region_name=self.region_name,
             )
 
-        return boto3.Session(region_name=self.region_name)
+        return boto3.Session(profile_name=profile_name, region_name=self.region_name)
 
     def upload_file(self, local_path: Path, key: Optional[str] = None) -> str:
         if not key:
