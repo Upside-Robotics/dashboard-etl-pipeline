@@ -89,6 +89,6 @@ jobs:
             chmod +x /home/ec2-user/run-etl.sh
 
             (crontab -l 2>/dev/null | grep -v 'run-etl.sh'; \
-             echo "0 13 * * * /home/ec2-user/run-etl.sh >> /home/ec2-user/etl.log 2>&1") | crontab -
+             echo "0 * * * * /home/ec2-user/run-etl.sh >> /home/ec2-user/etl.log 2>&1") | crontab -
 
             docker image prune -f
