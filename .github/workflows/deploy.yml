@@ -69,14 +69,12 @@ jobs:
               docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
 
             docker pull $IMAGE_URI
+            docker tag $IMAGE_URI ${{ env.CONTAINER_NAME }}:latest
 
             docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
             docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
 
-            docker run -d \
-              --name ${{ env.CONTAINER_NAME }} \
-              --restart unless-stopped \
-              --env-file /home/ec2-user/.env \
-              $IMAGE_URI
+            (crontab -l 2>/dev/null | grep -v '${{ env.CONTAINER_NAME }}'; \
+             echo "0 13 * * * docker run --rm --env-file /home/ec2-user/.env ${{ env.CONTAINER_NAME }}:latest >> /home/ec2-user/etl.log 2>&1") | crontab -
 
             docker image prune -f

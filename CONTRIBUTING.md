@@ -125,13 +125,17 @@ If you need to deploy without pushing to `main`:
 ```bash
 ssh -i <key.pem> ec2-user@<ec2-host>
 
-# Pull and run a specific image
+# Pull image and retag as latest
 IMAGE=<ecr-registry>/dashboard-etl-pipeline:<sha>
 aws ecr get-login-password --region ca-central-1 | docker login --username AWS --password-stdin <ecr-registry>
 docker pull $IMAGE
-docker stop dashboard-etl-pipeline && docker rm dashboard-etl-pipeline
-docker run -d --name dashboard-etl-pipeline --restart unless-stopped --env-file /home/ec2-user/.env $IMAGE
+docker tag $IMAGE dashboard-etl-pipeline:latest
+
+# Install (or update) the daily cron — runs at 9 AM EDT (13:00 UTC)
+make cron-install
 ```
+
+The pipeline runs as a one-shot container triggered by cron, not a persistent daemon. Verify the cron is set with `crontab -l`.
 
 ---
 
