@@ -1,0 +1,7 @@
+.venv/
+.git/
+.env
+extracted_data/
+etl_pipeline.log
+__pycache__/
+*.pyc

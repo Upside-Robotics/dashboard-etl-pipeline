@@ -91,4 +91,14 @@ jobs:
             (crontab -l 2>/dev/null | grep -v 'run-etl.sh'; \
              echo "0 * * * * /home/ec2-user/run-etl.sh >> /home/ec2-user/etl.log 2>&1") | crontab -
 
+            sudo tee /etc/logrotate.d/etl > /dev/null <<'EOF'
+            /home/ec2-user/etl.log {
+                weekly
+                rotate 4
+                compress
+                missingok
+                notifempty
+            }
+            EOF
+
             docker image prune -f
