@@ -105,10 +105,12 @@ class PostgreSQLConnector:
             return {}
     
     def retrieve_data_batched(
-        self, 
-        table_name: str, 
+        self,
+        table_name: str,
         batch_size: int = None,
-        limit: int = None
+        limit: int = None,
+        watermark_column: str = None,
+        watermark_value=None,
     ) -> Iterator[List[Dict[str, Any]]]:
         """
         Retrieve data from table in batches for memory efficiency
@@ -127,8 +129,14 @@ class PostgreSQLConnector:
             with self.connection.cursor() as cur:
                 # Use server-side cursor for large datasets
                 cur.arraysize = batch_size
-                
-                if limit:
+
+                if watermark_column and watermark_value is not None:
+                    query = sql.SQL("SELECT * FROM {table} WHERE {col} > {val}").format(
+                        table=sql.Identifier(table_name),
+                        col=sql.Identifier(watermark_column),
+                        val=sql.Literal(watermark_value),
+                    )
+                elif limit:
                     query = sql.SQL("SELECT * FROM {} LIMIT {}").format(
                         sql.Identifier(table_name),
                         sql.Literal(limit)

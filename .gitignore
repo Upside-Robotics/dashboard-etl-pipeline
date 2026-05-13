@@ -52,3 +52,7 @@ config_local.py
 secrets.json
 *.pem
 *.key
+
+
+*.pem
+.ssh/

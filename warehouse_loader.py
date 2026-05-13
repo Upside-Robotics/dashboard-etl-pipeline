@@ -103,6 +103,15 @@ class RedshiftConnector:
             cur.execute(query)
             self.connection.commit()
 
+    def get_max_watermark(self, table: str, column: str):
+        target = self._format_table_name(table)
+        with self.connection.cursor() as cur:
+            cur.execute(sql.SQL("SELECT MAX({col}) FROM {target}").format(
+                col=sql.Identifier(column),
+                target=target,
+            ))
+            return cur.fetchone()[0]
+
     def copy_from_s3(
         self,
         target_table: str,
@@ -149,10 +158,7 @@ class RedshiftConnector:
         )
 
         try:
-            truncate_query = sql.SQL("TRUNCATE TABLE {target}").format(target=target_table_sql)
             with self.connection.cursor() as cur:
-                cur.execute(truncate_query)
-                logger.info(f"Truncated target table {target_table} before COPY")
                 cur.execute(copy_query)
             self.connection.commit()
             logger.info("Redshift COPY completed successfully")

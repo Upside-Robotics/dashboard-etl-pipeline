@@ -17,10 +17,7 @@ from config import ETL_CONFIG, S3_CONFIG, AWS_CONFIG, REDSHIFT_CONFIG
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('etl_pipeline.log'),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -64,7 +61,7 @@ class ETLPipeline:
                 serialized[key] = value
         return serialized
 
-    def _extract_to_csv_file(self, table_name: str, output_file: Path, table_info: dict):
+    def _extract_to_csv_file(self, table_name: str, output_file: Path, table_info: dict, watermark_value=None):
         """Extract table data into a CSV file"""
         column_names = [col['name'] for col in table_info['columns']]
 
@@ -78,7 +75,11 @@ class ETLPipeline:
                 )
                 writer.writeheader()
 
-                for batch in self.connector.retrieve_data_batched(table_name):
+                for batch in self.connector.retrieve_data_batched(
+                    table_name,
+                    watermark_column="write_time",
+                    watermark_value=watermark_value,
+                ):
                     for row in batch:
                         row_serialized = self._serialize_row(row)
                         writer.writerow(row_serialized)
@@ -93,7 +94,7 @@ class ETLPipeline:
             logger.error(f"Error writing to CSV file: {e}")
             raise
 
-    def extract_and_stage_to_s3(self, table_name: str) -> str:
+    def extract_and_stage_to_s3(self, table_name: str, watermark_value=None) -> str:
         """Extract data from PostgreSQL and upload the CSV to S3"""
         logger.info(f"Starting extraction and staging to S3 for '{table_name}'")
         self.extraction_stats['start_time'] = datetime.now()
@@ -123,7 +124,7 @@ class ETLPipeline:
                 self.extraction_stats['local_csv_path'] = str(output_file)
 
                 logger.info(f"Extracting {table_info['row_count']} rows from '{table_name}'")
-                local_path = self._extract_to_csv_file(table_name, output_file, table_info)
+                local_path = self._extract_to_csv_file(table_name, output_file, table_info, watermark_value)
 
                 if self.extraction_stats['total_rows_extracted'] == 0:
                     logger.error("Aborting load because extraction failed or produced 0 rows. Redshift table was not modified.")
@@ -233,10 +234,28 @@ class ETLPipeline:
 
     def run_full_redshift_load(self, table_name: str) -> bool:
         """Run the full ETL flow: extract from Postgres, stage to S3, and load to Redshift"""
-        s3_uri = self.extract_and_stage_to_s3(table_name)
+        watermark_value = None
+        target_table = f"{REDSHIFT_CONFIG['schema']}.{REDSHIFT_CONFIG['table']}"
+        if self.redshift_loader.connect():
+            try:
+                watermark_value = self.redshift_loader.get_max_watermark(target_table, "write_time")
+                logger.info(f"Last write_time in Redshift: {watermark_value}")
+            except Exception as e:
+                logger.warning(f"Could not read watermark from Redshift: {e}. Loading all data.")
+            finally:
+                self.redshift_loader.disconnect()
+
+        s3_uri = self.extract_and_stage_to_s3(table_name, watermark_value=watermark_value)
+
         if not s3_uri:
+            if self.extraction_stats['total_rows_extracted'] == 0 and watermark_value is not None:
+                logger.info("No new rows since last run. Nothing to load.")
+                self.extraction_stats['status'] = 'up_to_date'
+                self.extraction_stats['end_time'] = datetime.now()
+                return True
             return False
 
+        self.extraction_stats['end_time'] = datetime.now()
         success = self.load_from_s3_to_redshift(s3_uri)
         if success:
             self._cleanup_old_s3_files()
