@@ -122,6 +122,7 @@ class RedshiftConnector:
         file_format: str = "csv",
         delimiter: str = ",",
         ignore_header: int = 1,
+        truncate: bool = False,
     ) -> bool:
         if not iam_role_arn and not (aws_credentials and aws_credentials.get("aws_access_key_id") and aws_credentials.get("aws_secret_access_key")):
             logger.error("No IAM role or AWS credentials configured for Redshift COPY")
@@ -159,6 +160,9 @@ class RedshiftConnector:
 
         try:
             with self.connection.cursor() as cur:
+                if truncate:
+                    cur.execute(sql.SQL("TRUNCATE TABLE {target}").format(target=target_table_sql))
+                    logger.info(f"Truncated {target_table} before COPY")
                 cur.execute(copy_query)
             self.connection.commit()
             logger.info("Redshift COPY completed successfully")

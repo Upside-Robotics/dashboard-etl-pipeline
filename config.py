@@ -21,7 +21,7 @@ POSTGRES_CONFIG = {
 S3_CONFIG = {
     "bucket_name": "upside-robotics-redshift-staging-aarav",
     "region_name": "ca-central-1",
-    "prefix": "robot_executive_state",
+    "prefix": "etl-staging",
     "file_format": "csv",  # Supported: csv, jsonl
 }
 
@@ -41,7 +41,6 @@ REDSHIFT_CONFIG = {
     "user": os.getenv("REDSHIFT_USER"),
     "password": os.getenv("REDSHIFT_PASSWORD"),
     "schema": os.getenv("REDSHIFT_SCHEMA"),
-    "table": os.getenv("REDSHIFT_TABLE"),
     "sslmode": "require",
     "copy_options": {
         "iam_role_arn": os.getenv("REDSHIFT_IAM_ROLE_ARN"),
@@ -53,8 +52,11 @@ REDSHIFT_CONFIG = {
 
 # ETL Pipeline Settings
 ETL_CONFIG = {
-    "batch_size": 10000,  # Number of rows to process at a time
-    "timeout": 300,  # Connection timeout in seconds
-    "source_table": "robot_executive_state",
+    "batch_size": 10000,
+    "timeout": 300,
     "target_file_format": "csv",
+    "tables": [
+        {"source": "robot_executive_state", "watermark_column": "write_time"},
+        {"source": "field_application_zones", "watermark_column": None},  # full replace each run
+    ],
 }

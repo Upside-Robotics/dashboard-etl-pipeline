@@ -61,7 +61,7 @@ class ETLPipeline:
                 serialized[key] = value
         return serialized
 
-    def _extract_to_csv_file(self, table_name: str, output_file: Path, table_info: dict, watermark_value=None):
+    def _extract_to_csv_file(self, table_name: str, output_file: Path, table_info: dict, watermark_column: str = None, watermark_value=None):
         """Extract table data into a CSV file"""
         column_names = [col['name'] for col in table_info['columns']]
 
@@ -77,7 +77,7 @@ class ETLPipeline:
 
                 for batch in self.connector.retrieve_data_batched(
                     table_name,
-                    watermark_column="write_time",
+                    watermark_column=watermark_column,
                     watermark_value=watermark_value,
                 ):
                     for row in batch:
@@ -94,7 +94,7 @@ class ETLPipeline:
             logger.error(f"Error writing to CSV file: {e}")
             raise
 
-    def extract_and_stage_to_s3(self, table_name: str, watermark_value=None) -> str:
+    def extract_and_stage_to_s3(self, table_name: str, watermark_column: str = None, watermark_value=None) -> str:
         """Extract data from PostgreSQL and upload the CSV to S3"""
         logger.info(f"Starting extraction and staging to S3 for '{table_name}'")
         self.extraction_stats['start_time'] = datetime.now()
@@ -124,7 +124,7 @@ class ETLPipeline:
                 self.extraction_stats['local_csv_path'] = str(output_file)
 
                 logger.info(f"Extracting {table_info['row_count']} rows from '{table_name}'")
-                local_path = self._extract_to_csv_file(table_name, output_file, table_info, watermark_value)
+                local_path = self._extract_to_csv_file(table_name, output_file, table_info, watermark_column, watermark_value)
 
                 if self.extraction_stats['total_rows_extracted'] == 0:
                     logger.error("Aborting load because extraction failed or produced 0 rows. Redshift table was not modified.")
@@ -157,7 +157,7 @@ class ETLPipeline:
             f.readline()  # skip header
             return bool(f.readline())  # True if at least one data row exists
 
-    def load_from_s3_to_redshift(self, s3_uri: str) -> bool:
+    def load_from_s3_to_redshift(self, s3_uri: str, table_name: str, truncate: bool = False) -> bool:
         """Load a staged S3 file into Redshift using COPY"""
         if not s3_uri:
             logger.error("No S3 URI provided for Redshift load")
@@ -181,7 +181,7 @@ class ETLPipeline:
             self.extraction_stats['redshift_status'] = 'failed'
             return False
 
-        target_table = f"{REDSHIFT_CONFIG['schema']}.{REDSHIFT_CONFIG['table']}"
+        target_table = f"{REDSHIFT_CONFIG['schema']}.{table_name}"
         copy_options = REDSHIFT_CONFIG.get('copy_options', {})
 
         if not self.redshift_loader.connect():
@@ -203,6 +203,7 @@ class ETLPipeline:
                 file_format=copy_options.get('file_format', 'csv'),
                 delimiter=copy_options.get('delimiter', ','),
                 ignore_header=copy_options.get('ignore_header', 1),
+                truncate=truncate,
             )
             self.extraction_stats['redshift_status'] = 'success' if success else 'failed'
             return success
@@ -232,20 +233,21 @@ class ETLPipeline:
         except Exception as e:
             logger.warning(f"S3 cleanup failed (non-fatal): {e}")
 
-    def run_full_redshift_load(self, table_name: str) -> bool:
+    def run_full_redshift_load(self, table_name: str, watermark_column: str = None) -> bool:
         """Run the full ETL flow: extract from Postgres, stage to S3, and load to Redshift"""
         watermark_value = None
-        target_table = f"{REDSHIFT_CONFIG['schema']}.{REDSHIFT_CONFIG['table']}"
-        if self.redshift_loader.connect():
-            try:
-                watermark_value = self.redshift_loader.get_max_watermark(target_table, "write_time")
-                logger.info(f"Last write_time in Redshift: {watermark_value}")
-            except Exception as e:
-                logger.warning(f"Could not read watermark from Redshift: {e}. Loading all data.")
-            finally:
-                self.redshift_loader.disconnect()
+        target_table = f"{REDSHIFT_CONFIG['schema']}.{table_name}"
+        if watermark_column:
+            if self.redshift_loader.connect():
+                try:
+                    watermark_value = self.redshift_loader.get_max_watermark(target_table, watermark_column)
+                    logger.info(f"Last {watermark_column} in Redshift: {watermark_value}")
+                except Exception as e:
+                    logger.warning(f"Could not read watermark from Redshift: {e}. Loading all data.")
+                finally:
+                    self.redshift_loader.disconnect()
 
-        s3_uri = self.extract_and_stage_to_s3(table_name, watermark_value=watermark_value)
+        s3_uri = self.extract_and_stage_to_s3(table_name, watermark_column=watermark_column, watermark_value=watermark_value)
 
         if not s3_uri:
             if self.extraction_stats['total_rows_extracted'] == 0 and watermark_value is not None:
@@ -256,7 +258,7 @@ class ETLPipeline:
             return False
 
         self.extraction_stats['end_time'] = datetime.now()
-        success = self.load_from_s3_to_redshift(s3_uri)
+        success = self.load_from_s3_to_redshift(s3_uri, table_name, truncate=watermark_column is None)
         if success:
             self._cleanup_old_s3_files()
         return success
@@ -272,26 +274,33 @@ def main():
     logger.info("ETL Pipeline Started")
     logger.info("=" * 60)
 
-    pipeline = ETLPipeline()
-    success = pipeline.run_full_redshift_load(ETL_CONFIG['source_table'])
+    overall_success = True
+    for table_cfg in ETL_CONFIG['tables']:
+        table_name = table_cfg['source']
+        logger.info(f"Processing table: {table_name}")
 
-    stats = pipeline.get_extraction_stats()
-    print("\n" + "=" * 60)
-    print("ETL STATISTICS")
-    print("=" * 60)
-    print(f"Status: {stats['status']}")
-    print(f"S3 URI: {stats.get('s3_uri')}" )
-    print(f"Redshift Load Status: {stats.get('redshift_status')}" )
-    print(f"Total Rows Extracted: {stats['total_rows_extracted']}")
-    print(f"Batches Processed: {stats['batches_processed']}")
-    if stats['start_time'] and stats['end_time']:
-        duration = (stats['end_time'] - stats['start_time']).total_seconds()
-        print(f"Duration: {duration:.2f} seconds")
-        if stats['total_rows_extracted'] > 0:
-            print(f"Throughput: {stats['total_rows_extracted'] / duration:.2f} rows/sec")
-    print("=" * 60 + "\n")
+        pipeline = ETLPipeline()
+        success = pipeline.run_full_redshift_load(table_name, watermark_column=table_cfg.get('watermark_column'))
+        if not success:
+            overall_success = False
 
-    return 0 if success else 1
+        stats = pipeline.get_extraction_stats()
+        print("\n" + "=" * 60)
+        print(f"ETL STATISTICS — {table_name}")
+        print("=" * 60)
+        print(f"Status: {stats['status']}")
+        print(f"S3 URI: {stats.get('s3_uri')}")
+        print(f"Redshift Load Status: {stats.get('redshift_status')}")
+        print(f"Total Rows Extracted: {stats['total_rows_extracted']}")
+        print(f"Batches Processed: {stats['batches_processed']}")
+        if stats['start_time'] and stats['end_time']:
+            duration = (stats['end_time'] - stats['start_time']).total_seconds()
+            print(f"Duration: {duration:.2f} seconds")
+            if stats['total_rows_extracted'] > 0:
+                print(f"Throughput: {stats['total_rows_extracted'] / duration:.2f} rows/sec")
+        print("=" * 60 + "\n")
+
+    return 0 if overall_success else 1
 
 
 if __name__ == "__main__":
